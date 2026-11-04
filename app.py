@@ -13,48 +13,64 @@ app.secret_key = "hrmantra_super_secret_key"
 
 scheduler = BackgroundScheduler()
 
-# Global state to track execution and the uploaded Excel data
+# List of templates to cycle through sequentially
+TEMPLATES = [
+    "hrmantra_daily_newsletter_day_01",
+    "hrmantra_daily_newsletter_day_02",
+    "hrmantra_daily_newsletter_day_03",
+    "hrmantra_daily_newsletter_day_04",
+    "hrmantra_daily_newsletter_day_05"
+]
+
+# Global state to track execution and the uploaded emails
 state = {
     "status": "Stopped",  
+    "template_index": 0,  # Tracks which template to send next
     "active_days": [],    
-    "email_data": []      # Stores list of dicts: [{'email': 'x', 'template': 'y'}]
+    "email_list": []      # Stores the list of 500+ emails
 }
 
 def pick_random_days():
     """Picks 2 random days of the week (0=Monday to 6=Sunday)."""
     state["active_days"] = random.sample(range(0, 7), 2)
-    print(f"System picked these days for the week: {state['active_days']}")
+    print(f"[{datetime.now()}] System picked these days for the week: {state['active_days']}")
 
 def shoot_email():
-    """Shoots the email using the specific template assigned in the Excel file."""
+    """Shoots the CURRENT template to ALL uploaded emails."""
     if state["status"] != "Running":
         return
 
     current_day = datetime.today().weekday()
     
     if current_day in state["active_days"]:
-        if not state["email_data"]:
-            print("No email data loaded. Skipping execution.")
+        if not state["email_list"]:
+            print(f"[{datetime.now()}] No email data loaded. Skipping execution.")
             return
 
-        for row in state["email_data"]:
-            email = row['email']
-            template = row['template']
-            
+        # Pick the template for today's blast
+        current_template = TEMPLATES[state["template_index"]]
+        print(f"[{datetime.now()}] Starting blast for template: {current_template}")
+        
+        # Blast to all 500+ emails
+        for email in state["email_list"]:
             url = (
                 f"https://eapi.instaalerts.zone/email?uname=HRM_Email"
                 f"&pass=ASHOKsurendra123%21%40%23&fromName=HRMantra"
-                f"&TemplateID={template}&fromEmail=sales@hrmantra.com"
+                f"&TemplateID={current_template}&fromEmail=sales@hrmantra.com"
                 f"&toEmail={email}&subject=Stage+test"
             )
             
             try:
                 response = requests.get(url)
-                print(f"[{datetime.now()}] Sent {template} to {email} - Status: {response.status_code}")
-                # 1-second delay to prevent overloading the email API
+                print(f"Sent {current_template} to {email} - Status: {response.status_code}")
+                # 1-second delay to prevent overloading your email API provider
                 time.sleep(1) 
             except Exception as e:
-                print(f"[{datetime.now()}] Error shooting email to {email}: {e}")
+                print(f"Error shooting email to {email}: {e}")
+
+        # Once the blast is complete, queue up the next template for the NEXT active day
+        state["template_index"] = (state["template_index"] + 1) % len(TEMPLATES)
+        print(f"[{datetime.now()}] Blast complete. Next template queued: {TEMPLATES[state['template_index']]}")
 
 # Schedule the randomizer to run every Monday at 00:00 to pick new days
 scheduler.add_job(pick_random_days, CronTrigger(day_of_week='mon', hour=0, minute=0))
@@ -112,20 +128,21 @@ HTML_UI = """
         </form>
 
         <div class="upload-section">
-            <h3>Upload Master Excel (.xlsx)</h3>
-            <p style="font-size: 12px; color: #666;">File must contain columns named exactly <b>Email</b> and <b>TemplateID</b>.</p>
+            <h3>Upload Email List (.xlsx or .csv)</h3>
+            <p style="font-size: 12px; color: #666;">File must contain a column named exactly <b>Email</b>.</p>
             <form action="/upload" method="post" enctype="multipart/form-data">
-                <input type="file" name="email_file" accept=".xlsx" required>
+                <input type="file" name="email_file" accept=".xlsx, .csv" required>
                 <br>
                 <button type="submit" class="btn btn-upload">Upload Data</button>
             </form>
-            <p>Total Records Loaded: <strong>{{ state['email_data']|length }}</strong></p>
+            <p>Total Emails Loaded: <strong>{{ state['email_list']|length }}</strong></p>
         </div>
 
         <div class="details">
+            <p><strong>Next Template to Blast:</strong> <span style="color: blue;">{{ current_template }}</span></p>
             <p><strong>Active Days (0=Mon, 6=Sun):</strong> {{ state['active_days'] }}</p>
             <hr>
-            <p><i>System checks daily at 10:00 AM. If today is an active day, it shoots to all uploaded emails using their assigned templates.</i></p>
+            <p><i>System checks daily at 10:00 AM. If today is an active day, it shoots the 'Next Template' to all uploaded emails, then queues up the next template for the next scheduled day.</i></p>
         </div>
     </div>
 </body>
@@ -134,7 +151,11 @@ HTML_UI = """
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_UI, state=state)
+    return render_template_string(
+        HTML_UI, 
+        state=state,
+        current_template=TEMPLATES[state["template_index"]]
+    )
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
@@ -147,34 +168,34 @@ def upload_file():
         flash("No selected file.", "error")
         return redirect(url_for('index'))
 
-    if file and file.filename.endswith('.xlsx'):
+    if file:
         try:
-            # Read the Excel file
-            df = pd.read_excel(file)
-            
-            # Check if required columns exist
-            if 'Email' not in df.columns or 'TemplateID' not in df.columns:
-                flash("Error: Excel file must contain 'Email' and 'TemplateID' columns.", "error")
+            # Handle both Excel and CSV uploads seamlessly
+            if file.filename.endswith('.xlsx'):
+                df = pd.read_excel(file)
+            elif file.filename.endswith('.csv'):
+                df = pd.read_csv(file)
+            else:
+                flash("Please upload a valid .xlsx or .csv file.", "error")
                 return redirect(url_for('index'))
             
-            # Drop empty rows and convert to dictionary
-            df = df.dropna(subset=['Email', 'TemplateID'])
-            records = df.to_dict('records')
+            # Check if required column exists
+            if 'Email' not in df.columns:
+                flash("Error: File must contain an 'Email' column.", "error")
+                return redirect(url_for('index'))
             
-            cleaned_data = []
-            for row in records:
-                cleaned_data.append({
-                    "email": str(row['Email']).strip(),
-                    "template": str(row['TemplateID']).strip()
-                })
+            # Drop empty rows and extract list of emails
+            df = df.dropna(subset=['Email'])
+            emails = df['Email'].astype(str).str.strip().tolist()
             
-            state["email_data"] = cleaned_data
-            flash(f"Successfully loaded {len(cleaned_data)} records from Excel!", "flash")
+            # Clean out any empty strings
+            cleaned_emails = [e for e in emails if e]
+            
+            state["email_list"] = cleaned_emails
+            flash(f"Successfully loaded {len(cleaned_emails)} emails!", "flash")
             
         except Exception as e:
             flash(f"Error processing file: {str(e)}", "error")
-    else:
-        flash("Please upload a valid .xlsx file.", "error")
         
     return redirect(url_for('index'))
 
@@ -183,6 +204,7 @@ def handle_action(cmd):
     if cmd == 'start':
         if state["status"] == "Stopped":
             pick_random_days()
+            state["template_index"] = 0 # Reset to day 01 template when started fresh
         state["status"] = "Running"
         if not scheduler.running:
             scheduler.start()
@@ -193,7 +215,8 @@ def handle_action(cmd):
     elif cmd == 'stop':
         state["status"] = "Stopped"
         state["active_days"] = []
-        state["email_data"] = [] # Clears the loaded data
+        state["email_list"] = [] # Clears the loaded data
+        state["template_index"] = 0 # Resets the template cycle back to the beginning
         
     return redirect(url_for('index'))
 
